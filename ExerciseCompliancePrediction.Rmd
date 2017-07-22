@@ -1,0 +1,226 @@
+---
+title: "Classification of Exercise Performance Using Sensor Data"
+author: "David M. Leonard"
+date: "July 21, 2017"
+output: html_document
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE)
+library(parallel)
+library(doParallel)
+library(dplyr)
+library(caret)
+library(randomForest)
+setwd("C:/Users/Dave/Documents/Data Science/Coursera/Machine Learning/Course Project")
+```
+
+## Executive Summary
+
+The growing popularity of personal activity sensors has resulted in a plethora of data that can be used to classify the type of activity an individual is engaged in at a particular moment in time. A [project led by Eduardo Velloso](http://groupware.les.inf.puc-rio.br/public/papers/2013.Velloso.QAR-WLE.pdf) at Lancaster University took advantage of such data to model the performance of a group of individuals doing a specific weight training exercise; they used the model to predict whether the study participants were performing the exercise correctly, or incorrectly in one of several different ways. They reported a weighted average classification accuracy of 98.2% when looking at sensor measurements based on a sampling period of 2.5 seconds.  
+
+This paper describes a project to duplicate their results, using data made available by the original research team. We were able to achieve an accuracy as good or better than the original team, using a similar modeling approach.
+
+## The Goal
+
+Velloso's team was interested in classifying the observed quality of a specific weight lifting exercise (unilateral dumbbell biceps curl) by a group of volunteers. The exercise has a well-prescribed set of execution criteria, which when accurately followed, result in "correct" performance. In addition to accurately performing the desired exercise, the team identified four common mistakes that are made, for a total of five classifications of execution:  
+
+* Class A: exactly according to specifications  
+* Class B: throwing elbows to the front  
+* Class C: lifting the dumbbell only halfway  
+* Class D: lowering the dumbbell only halfway, and  
+* Class E: throwing the hips to the front   
+
+They enlisted six male participants to perform the exercise in each of the five different ways, and recorded measurements from sensors on a waist belt, arm band, glove, and dumbbell. The sensors included an accelerometer, gyroscope, and magnetometer. The goal was to devise a model that could use the collected data to correctly identify which of the five variants of the exercise was performed in each case. 
+
+## Data Description And Cleansing  
+
+A quick look at the data revealed that there were a large number of columns with no values. There were also several non-numeric columns (user_name and new_window) that seemed unlikely to contribute to prediction accuracy. These columns were all removed.
+```{r echo=TRUE}
+traindata <- tbl_df(read.csv("pml-training.csv", na.strings = c("","NA")))
+
+# Remove any columns that have NA values
+notna <- colSums(is.na(traindata)) == 0
+trainreduce <- traindata[,notna]
+
+# Remove any non-numeric columns, but keep the classe column
+nums <- sapply(trainreduce, is.numeric)
+trainreduce <- cbind(classe = traindata$classe, trainreduce[,nums])
+
+# Set a cutoff value for high correlation between variables
+cutoff <- 0.75
+```
+The supplied data included `r formatC(nrow(traindata), big.mark = ",")` observations, each consisting of `r ncol(traindata)` variables. Of those variables, only `r sum(notna)` were populated with values.  
+
+In order to reduce computation time, feature selection was done using a correlation matrix generated on the remaining numeric variables. Variables with a correlation value greater than `r cutoff*100`% were then removed. (See the appendix)
+```{r echo=TRUE}
+# Create a correlation matrix to find the features which are highly
+# correlated. These are opportunities for feature reduction
+corm <- cor(trainreduce[,2:length(names(trainreduce))])
+
+# Use the findCorrelation function to identify the candidates for 
+# reduction (assume correlation > 75% is high)
+highcor <- findCorrelation(corm,cutoff = cutoff)
+
+highcorvars <- names(trainreduce)[highcor]
+
+# Let's remove these columns...
+trainreduce <- trainreduce[,-highcor]
+```
+
+The resulting training data had a total of `r ncol(trainreduce)-1` predictors:
+
+```{r}
+names(trainreduce)
+```
+
+## Prediction Modeling  
+The data was split into randomly selected training and testing sets of equal size, and a random forest was generated against the training set using 10-fold cross validation.
+```{r echo = TRUE, message = FALSE}
+# Split the training data into train and test
+set.seed(0)
+trainsamp <- sample(1:dim(trainreduce)[1],size=dim(trainreduce)[1]*0.5,replace=F)
+train <- trainreduce[trainsamp,]
+test <- trainreduce[-trainsamp,]
+
+# Set up the control parameters for the train function; use 10-fold
+# cross-validation and indicate that parallel processing is allowed
+control <- trainControl(method = "cv", number = 10, allowParallel = TRUE)
+
+# We may need lots of horsepower...set up parallel processing
+cluster <- makeCluster(detectCores() - 1) # Leave one core for the OS to use
+registerDoParallel(cluster)
+
+# Build the model: random forest
+set.seed(0)
+model <- train(classe ~ ., method = "rf", data = train, trControl = control)
+
+# Now shutdown the core cluster to return R to single threading
+stopCluster(cluster)
+registerDoSEQ()
+```
+Looking at the measure of variable importance in the resulting model, the variable "X" turned out to be a highly significant predictor (see the importance table in the appendix). This is surprising, since it is a simple monotonically-increasing integer value. However, it might serve to differentiate the beginning and end of individual repetitions of the exercise, which would be critical to accurate classification. To test this theory, I created an alternative model (described in the appendix), which used a full timestamp in place of the X variable; the results were also quite good, although not as good as simply using the X variable.
+
+## Model Accuracy  
+
+The model was used to create a set of predictions for the observations in the test sample.
+```{r echo = TRUE}
+# Get a set of predictions for the test data set
+pred <- predict(model, newdata = test)
+
+# Build a confusion matrix and get the overall accuracy on the test sample
+cm <- confusionMatrix(pred, test$classe)
+overallaccuracy <- cm$overall[1]
+cm$table
+
+# Calculate probability of 100% prediction accuracy on a small sample
+samplesize <- 20
+expsampleaccuracy <- overallaccuracy^samplesize
+```
+The overall accuracy of the predictions on the test sample was `r round(overallaccuracy*100,2)`%. This is higher than that reported by Vellos in the original research paper.
+
+## Conclusion  
+
+A random forest model trained on a groomed data sample was able to attain a very high prediction accuracy on a test sample of equal size. The probability that we would have 100% accuracy with this model on a sample of 20 observations is estimated to be `r round(expsampleaccuracy*100,2)`%.  
+
+## Appendix  
+
+### Confusion Matrix Details for Test Sample  
+```{r echo=TRUE}
+cm
+```
+### Importance of Variables Used In The Model
+```{r echo=TRUE}
+# Get the variable importance table
+vi <- varImp(model)
+vi
+plot(vi)
+```
+
+### Model Output
+```{r echo = TRUE}
+model
+```
+### Alternative Model: Create full timestamp, Remove variable "X"  
+I was curious about the significant role that the variable X played in the prediction power of the random forest model. I hypothesized that the data had been sequenced in such a way that individual repetitions of the exercise were represented by contiguous groups of observations. I created a single time variable by adding together the two portions of the timestamp, and substituted that for the variable X in the training data, then reran the model.  
+
+The resulting accuracy was still quite high, but slightly lower than that of the original model using the sequence number X. As a general rule, I would prefer to rely on the actual timestamps rather than a sequence number that would require careful assembly of the data to be useful. Nonetheless, in this particular case it provided significant benefit.
+
+```{r echo = TRUE}
+######### Alternative Model Using Full Timestamp in place of X variable
+# Remove any columns that have NA values
+notna <- colSums(is.na(traindata)) == 0
+trainreduce <- traindata[,notna]
+
+# Remove any non-numeric columns, but keep the classe column
+nums <- sapply(trainreduce, is.numeric)
+trainreduce <- cbind(classe = traindata$classe, trainreduce[,nums])
+
+#Create a single column with a full timestamp
+trainreduce$time <- trainreduce$raw_timestamp_part_1*10^6 + 
+    trainreduce$raw_timestamp_part_2
+
+# Drop the original timestamp columns and the sequence column X
+
+drops <- c("raw_timestamp_part_1", "raw_timestamp_part_2", "X")
+trainreduce <- trainreduce[,-which(names(trainreduce) %in% drops)]
+
+# Set a cutoff value for high correlation between variables
+cutoff <- 0.75
+
+# Create a correlation matrix to find the features which are highly
+# correlated. These are opportunities for feature reduction
+corm <- cor(trainreduce[,2:length(names(trainreduce))])
+
+# Use the findCorrelation function to identify the candidates for 
+# reduction (assume correlation > 75% is high)
+highcor <- findCorrelation(corm,cutoff = cutoff)
+
+highcorvars <- names(trainreduce)[highcor]
+
+# Let's remove these columns...
+trainreduce <- trainreduce[,-highcor]
+
+# Split the training data into train and validation
+set.seed(0)
+trainsamp <- sample(1:dim(trainreduce)[1],size=dim(trainreduce)[1]*0.5,replace=F)
+train <- trainreduce[trainsamp,]
+test <- trainreduce[-trainsamp,]
+
+# Set up the control parameters for the train function; use 10-fold
+# cross-validation and indicate that parallel processing is allowed
+control <- trainControl(method = "cv", number = 10, allowParallel = TRUE)
+
+# We may need lots of horsepower...set up parallel processing
+cluster <- makeCluster(detectCores() - 1) # Leave one core for the OS to use
+registerDoParallel(cluster)
+
+# Build the model: random forest
+set.seed(0)
+model <- train(classe ~ ., method = "rf", data = train, trControl = control)
+
+# Now shutdown the core cluster to return R to single threading
+stopCluster(cluster)
+registerDoSEQ()
+
+# Get the variable importance table
+vi <- varImp(model)
+
+# Get a set of predictions for the test data set
+pred <- predict(model, newdata = test)
+
+# Build a confusion matrix and get the overall accuracy on the test sample
+cm <- confusionMatrix(pred, test$classe)
+overallaccuracy <- cm$overall[1]
+cm
+
+samplesize <- 20
+expsampleaccuracy <- overallaccuracy^samplesize
+
+print(paste("Probability of 100% accuracy on a sample of 20 observations is ",
+            round(expsampleaccuracy*100,2),"%",sep = ""))
+
+# Inspect the variable importance table
+vi
+plot(vi)
+```
+
